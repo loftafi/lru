@@ -1,0 +1,14 @@
+.{
+    .name = .lru,
+    .version = "0.1.0",
+    .fingerprint = 0x83ea7591101c4173,
+    .minimum_zig_version = "0.14.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE.md",
+        "README.md",
+    },
+}
