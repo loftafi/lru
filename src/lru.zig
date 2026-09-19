@@ -30,7 +30,7 @@ pub fn LRU(comptime K: type, comptime V: type) type {
             return Self{
                 .keys = DoublyLinkedList(K){},
                 .entries = .empty,
-                .mutex = .{},
+                .mutex = .init,
                 .limit = limit,
                 .len = 0,
                 .entry_dealloc = null,
@@ -57,11 +57,12 @@ pub fn LRU(comptime K: type, comptime V: type) type {
         pub fn put(
             self: *Self,
             allocator: Allocator,
+            io: std.Io,
             key: K,
             value: V,
-        ) Allocator.Error!void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        ) (std.Io.Cancelable || Allocator.Error)!void {
+            try self.mutex.lock(io);
+            defer self.mutex.unlock(io);
 
             const entry = try self.entries.getOrPut(allocator, key);
 
@@ -103,9 +104,13 @@ pub fn LRU(comptime K: type, comptime V: type) type {
         }
 
         /// Return the value assocaited with a key if it exists in the cache:
-        pub fn get(self: *Self, key: K) ?V {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn get(
+            self: *Self,
+            io: std.Io,
+            key: K,
+        ) std.Io.Cancelable!?V {
+            try self.mutex.lock(io);
+            defer self.mutex.unlock(io);
             if (self.entries.get(key)) |hash_value| {
                 self.keys.remove(hash_value.node);
                 self.keys.prepend(hash_value.node);
@@ -116,9 +121,9 @@ pub fn LRU(comptime K: type, comptime V: type) type {
         }
 
         /// Return the number of items in the cache.
-        pub fn count(self: *Self) usize {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn count(self: *Self, io: std.Io) std.Io.Cancelable!usize {
+            try self.mutex.lock(io);
+            defer self.mutex.unlock(io);
             return self.len;
         }
 
@@ -131,19 +136,21 @@ pub fn LRU(comptime K: type, comptime V: type) type {
 
 test "init_deinit" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var lru = LRU(i64, i64).init(10);
     defer lru.deinit(allocator);
 
     var lru2 = LRU(i64, i64).init(10);
-    try lru2.put(allocator, 50, 60);
-    try lru2.put(allocator, 50, 61);
-    try lru2.put(allocator, 53, 63);
+    try lru2.put(allocator, io, 50, 60);
+    try lru2.put(allocator, io, 50, 61);
+    try lru2.put(allocator, io, 53, 63);
     defer lru2.deinit(allocator);
 }
 
 test "destry_helper" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     const Sample = struct {
         age: u8 = 10,
@@ -168,109 +175,114 @@ test "destry_helper" {
     const sample3 = try allocator.create(Sample);
     sample3.*.age = 40;
 
-    try lru.put(allocator, 20, sample);
-    try lru.put(allocator, 30, sample2);
-    try lru.put(allocator, 40, sample3);
+    try lru.put(allocator, io, 20, sample);
+    try lru.put(allocator, io, 30, sample2);
+    try lru.put(allocator, io, 40, sample3);
 
-    try expect(lru.get(30).?.age == 30);
-    try expect(lru.get(40).?.age == 40);
-    try expect(lru.get(20) == null);
+    try expect((try lru.get(io, 30)).?.age == 30);
+    try expect((try lru.get(io, 40)).?.age == 40);
+    try expect(try lru.get(io, 20) == null);
 
     // Test when put causes entry replacement needing dealloc
     const sample4 = try allocator.create(Sample);
     sample4.*.age = 40;
-    try lru.put(allocator, 40, sample4);
+    try lru.put(allocator, io, 40, sample4);
 }
 
 test "put_get" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var lru = LRU(u16, u16).init(256);
     defer lru.deinit(allocator);
 
-    try lru.put(allocator, 10, 20);
-    try expect(lru.get(10).? == 20);
+    try lru.put(allocator, io, 10, 20);
+    try expect((try lru.get(io, 10)).? == 20);
 
-    try lru.put(allocator, 20, 30);
-    try expect(lru.get(20).? == 30);
+    try lru.put(allocator, io, 20, 30);
+    try expect((try lru.get(io, 20)).? == 30);
 
-    try lru.put(allocator, 20, 40);
-    try expect(lru.get(20).? == 40);
+    try lru.put(allocator, io, 20, 40);
+    try expect((try lru.get(io, 20)).? == 40);
 
-    try expect(lru.get(30) == null);
+    try expect(try lru.get(io, 30) == null);
 }
 
 test "length_check" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var lru = LRU(u16, usize).init(50);
     defer lru.deinit(allocator);
 
-    try expect(lru.count() == 0);
+    try expect(try lru.count(io) == 0);
 
-    try lru.put(allocator, 1, 10);
-    try expect(lru.count() == 1);
+    try lru.put(allocator, io, 1, 10);
+    try expect(try lru.count(io) == 1);
 
-    try lru.put(allocator, 2, 20);
-    try expect(lru.count() == 2);
+    try lru.put(allocator, io, 2, 20);
+    try expect(try lru.count(io) == 2);
 
-    try lru.put(allocator, 2, 30);
-    try expect(lru.count() == 2);
+    try lru.put(allocator, io, 2, 30);
+    try expect(try lru.count(io) == 2);
 }
 
 test "oldest_removal" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var lru = LRU(usize, usize).init(2);
     defer lru.deinit(allocator);
 
-    try lru.put(allocator, 1, 10);
-    try lru.put(allocator, 2, 20);
-    try expect(lru.count() == 2);
+    try lru.put(allocator, io, 1, 10);
+    try lru.put(allocator, io, 2, 20);
+    try expect(try lru.count(io) == 2);
 
     // Check adding one too many items evicts the oldest item.
-    try lru.put(allocator, 3, 30);
+    try lru.put(allocator, io, 3, 30);
 
-    try expect(lru.count() == 2);
+    try expect(try lru.count(io) == 2);
     try expect(lru.getKeys().len == 2);
 
-    try expect(lru.get(1) == null);
-    try expect(lru.get(2).? == 20);
-    try expect(lru.get(3).? == 30);
+    try expect(try lru.get(io, 1) == null);
+    try expect((try lru.get(io, 2)).? == 20);
+    try expect((try lru.get(io, 3)).? == 30);
 
     // Check oldest (not used) entry is removed.
-    try lru.put(allocator, 4, 40);
-    try expect(lru.get(2) == null);
+    try lru.put(allocator, io, 4, 40);
+    try expect(try lru.get(io, 2) == null);
 }
 
 test "read_can_evict" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var lru = LRU(u64, usize).init(6);
     defer lru.deinit(allocator);
 
-    try lru.put(allocator, 1, 1);
-    try lru.put(allocator, 2, 2);
-    try lru.put(allocator, 3, 3);
-    try lru.put(allocator, 4, 4);
-    try lru.put(allocator, 5, 5);
-    try lru.put(allocator, 6, 6);
+    try lru.put(allocator, io, 1, 1);
+    try lru.put(allocator, io, 2, 2);
+    try lru.put(allocator, io, 3, 3);
+    try lru.put(allocator, io, 4, 4);
+    try lru.put(allocator, io, 5, 5);
+    try lru.put(allocator, io, 6, 6);
 
     // Use some of the entries so they become recent.
-    try expect(lru.get(1).? == 1);
-    try expect(lru.get(2).? == 2);
+    try expect((try lru.get(io, 1)).? == 1);
+    try expect((try lru.get(io, 2)).? == 2);
 }
 
 // Threaded use avoids thred leaks and panics
 test "threadsafe_concurrency" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
     var threads: [5]std.Thread = undefined;
 
     var lru = LRU(usize, usize).init(200);
     defer lru.deinit(allocator);
 
     for (&threads, 0..) |*thread, i|
-        thread.* = try std.Thread.spawn(.{}, lru_thread, .{ allocator, &lru, i });
+        thread.* = try std.Thread.spawn(.{}, lru_thread, .{ allocator, io, &lru, i });
 
     for (&threads) |*thread|
         thread.*.join();
@@ -278,14 +290,15 @@ test "threadsafe_concurrency" {
 
 fn lru_thread(
     allocator: Allocator,
+    io: std.Io,
     lru: *LRU(usize, usize),
     value: usize,
-) error{OutOfMemory}!void {
+) error{ OutOfMemory, Canceled }!void {
     const x: usize = 100 * value;
 
     for (0..1000) |i| {
-        try lru.put(allocator, i + x, value);
-        _ = lru.get(i + x);
+        try lru.put(allocator, io, i + x, value);
+        _ = try lru.get(io, i + x);
     }
 }
 
@@ -293,5 +306,5 @@ const std = @import("std");
 const expect = std.testing.expect;
 
 const Allocator = std.mem.Allocator;
-const DoublyLinkedList = std.DoublyLinkedList;
-const Mutex = std.Thread.Mutex;
+const DoublyLinkedList = @import("linked_list.zig").DoublyLinkedList;
+const Mutex = std.Io.Mutex;
